@@ -5,7 +5,21 @@
 ############################################################
 # ライブラリの読み込み
 ############################################################
-from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
+# PDF読み込み用のインポート（Streamlit Cloud対応）
+try:
+    from langchain_community.document_loaders import PyMuPDFLoader
+    PDF_LOADER = PyMuPDFLoader
+except ImportError:
+    # フォールバック：PyPDFLoader を使用
+    try:
+        from langchain_community.document_loaders import PyPDFLoader
+        PDF_LOADER = PyPDFLoader
+    except ImportError:
+        # 最終フォールバック：UnstructuredPDFLoader
+        from langchain_community.document_loaders import UnstructuredPDFLoader
+        PDF_LOADER = UnstructuredPDFLoader
+
+from langchain_community.document_loaders import Docx2txtLoader, TextLoader
 from langchain_community.document_loaders.csv_loader import CSVLoader
 
 
@@ -48,7 +62,7 @@ TEMPERATURE = 0.5
 # ==========================================
 RAG_TOP_FOLDER_PATH = "./data"
 SUPPORTED_EXTENSIONS = {
-    ".pdf": PyMuPDFLoader,
+    ".pdf": PDF_LOADER,
     ".docx": Docx2txtLoader,
     ".txt": lambda path: TextLoader(path, encoding="utf-8"),
     ".csv": lambda path: CSVLoader(path, encoding="utf-8")
