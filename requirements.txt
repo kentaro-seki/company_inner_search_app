@@ -1,29 +1,12 @@
-# Streamlit Community Cloud用最適化依存関係
-# 必須パッケージのみを含め、バージョン競合を回避
-
-# Core dependencies
-python-dotenv>=1.0.0
+# Streamlit Community Cloud用最小構成
 streamlit>=1.28.0
-
-# AI/ML libraries
 openai>=1.0.0
 langchain>=0.1.0
 langchain-community>=0.0.20
 langchain-openai>=0.1.0
-
-# Vector database
 chromadb>=0.4.0
-
-# Document processing
-PyMuPDF>=1.23.0
 python-docx>=1.1.0
-docx2txt>=0.8
-
-# Data handling
 pandas>=2.0.0
 numpy>=1.24.0
-
-# Additional required packages
 tiktoken
-beautifulsoup4
-lxml
+python-dotenv>=1.0.0
