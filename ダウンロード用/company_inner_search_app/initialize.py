@@ -103,22 +103,32 @@ def initialize_session_id():
 
 def initialize_retriever():
     """
-    画面読み込み時にRAGのRetriever（ベクターストアから検索するオブジェクト）を作成
+    Retrieverの初期化
     """
-    # ロガーを読み込むことで、後続の処理中に発生したエラーなどがログファイルに記録される
     logger = logging.getLogger(ct.LOGGER_NAME)
-
-    # すでにRetrieverが作成済みの場合、後続の処理を中断
-    if "retriever" in st.session_state:
-        return
     
     try:
-        # メモリ使用量を監視
-        import gc
-        gc.collect()  # ガベージコレクション実行
+        logger.info("=== Retriever初期化開始 ===")
         
+        # OpenAI API キーの確認
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.error("OPENAI_API_KEY が設定されていません")
+            st.error("OpenAI API キーが設定されていません。Streamlit Cloud の Settings > Secrets で設定してください。")
+            return
+        
+        logger.info(f"OpenAI API キーが設定されています (長さ: {len(api_key)})")
+
         # RAGの参照先となるデータソースの読み込み
+        logger.info("データソースの読み込みを開始します...")
         docs_all = load_data_sources()
+        logger.info(f"読み込み完了: 総ドキュメント数 = {len(docs_all)}")
+        
+        # ドキュメントが空の場合の対処
+        if not docs_all:
+            logger.error("ドキュメントが読み込まれていません。data フォルダとファイルを確認してください。")
+            st.error("ドキュメントの読み込みに失敗しました。data フォルダにファイルが存在するか確認してください。")
+            return
 
         # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
         for doc in docs_all:
@@ -127,61 +137,16 @@ def initialize_retriever():
                 doc.metadata[key] = adjust_string(doc.metadata[key])
         
         # 埋め込みモデルの用意
-        embeddings = OpenAIEmbeddings()
-        
-        # チャンク分割用のオブジェクトを作成
-        text_splitter = CharacterTextSplitter(
-            chunk_size=ct.CHUNK_SIZE,
-            chunk_overlap=ct.CHUNK_OVERLAP,
-            separator="\n\n"  # txtファイルの論理的な分割のため、段落区切りを使用
-        )
-
-        # 部署別統合ドキュメントと通常ドキュメントを分離
-        department_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "department_employees"]
-        all_employees_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "all_employees"]
-        regular_docs = [doc for doc in docs_all if doc.metadata.get("document_type") not in ["department_employees", "all_employees"]]
-        
-        logger.info(f"部署別統合ドキュメント: {len(department_docs)}件")
-        logger.info(f"全社員統合ドキュメント: {len(all_employees_docs)}件")
-        logger.info(f"通常ドキュメント: {len(regular_docs)}件")
-
-        # 通常ドキュメントのみチャンク分割を実施
-        splitted_regular_docs = text_splitter.split_documents(regular_docs)
-        
-        # 部署別統合ドキュメントと全社員統合ドキュメントはそのまま追加（分割しない）
-        splitted_docs = splitted_regular_docs + department_docs + all_employees_docs
-        
-        logger.info(f"最終ドキュメント数: {len(splitted_docs)}件（分割後通常: {len(splitted_regular_docs)}, 統合: {len(department_docs + all_employees_docs)}）")
-
-        # デバッグ用：txtファイルのチャンクを確認
-        txt_chunks = [doc for doc in splitted_docs if doc.metadata.get("source", "").endswith(".txt")]
-        logger.info(f"txtファイルのチャンク数: {len(txt_chunks)}")
-        for i, chunk in enumerate(txt_chunks):
-            content_preview = chunk.page_content[:100].replace('\n', ' ')
-            logger.info(f"txtチャンク{i+1}: {chunk.metadata.get('source', '不明')} - 内容: {content_preview}...")
-
-        # ベクターストアの作成（エラーハンドリング付き）
-        db = Chroma.from_documents(splitted_docs, embedding=embeddings)
-
-        # ベクターストアを検索するRetrieverの作成（検索パラメータを最適化）
-        st.session_state.retriever = db.as_retriever(
-            search_type="similarity", 
-            search_kwargs={
-                "k": ct.NUM_RETRIEVAL_DOCS
-            }
-        )
-        
-        logger.info("Retriever初期化完了")
-        
-    except Exception as e:
-        logger.error(f"Retriever初期化エラー: {str(e)}")
-        st.error(f"システム初期化に失敗しました: {str(e)}")
-        raise e
-    
-    finally:
-        # メモリクリーンアップ
-        import gc
-        gc.collect()
+        logger.info("OpenAI Embeddings を初期化しています...")
+        try:
+            embeddings = OpenAIEmbeddings()
+            # テスト用の小さなテキストで埋め込み生成をテスト
+            test_embedding = embeddings.embed_query("テスト")
+            logger.info(f"埋め込みテスト成功: 次元数 = {len(test_embedding)}")
+        except Exception as e:
+            logger.error(f"OpenAI Embeddings の初期化に失敗: {str(e)}")
+            st.error(f"OpenAI API の設定に問題があります: {str(e)}")
+            return
 
 
 def initialize_session_state():
@@ -202,22 +167,40 @@ def load_data_sources():
     Returns:
         読み込んだ通常データソース
     """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"データ読み込み開始: {ct.RAG_TOP_FOLDER_PATH}")
+    
+    # データフォルダの存在確認
+    if not os.path.exists(ct.RAG_TOP_FOLDER_PATH):
+        logger.error(f"データフォルダが見つかりません: {ct.RAG_TOP_FOLDER_PATH}")
+        return []
+    
     # データソースを格納する用のリスト
     docs_all = []
     # ファイル読み込みの実行（渡した各リストにデータが格納される）
     recursive_file_check(ct.RAG_TOP_FOLDER_PATH, docs_all)
+    
+    logger.info(f"ファイル読み込み完了: {len(docs_all)}件のドキュメント")
 
     web_docs_all = []
     # ファイルとは別に、指定のWebページ内のデータも読み込み
     # 読み込み対象のWebページ一覧に対して処理
     for web_url in ct.WEB_URL_LOAD_TARGETS:
-        # 指定のWebページを読み込み
-        loader = WebBaseLoader(web_url)
-        web_docs = loader.load()
-        # for文の外のリストに読み込んだデータソースを追加
-        web_docs_all.extend(web_docs)
+        logger.info(f"Webページ読み込み: {web_url}")
+        try:
+            # 指定のWebページを読み込み
+            loader = WebBaseLoader(web_url)
+            web_docs = loader.load()
+            # for文の外のリストに読み込んだデータソースを追加
+            web_docs_all.extend(web_docs)
+            logger.info(f"Webページ読み込み成功: {len(web_docs)}件")
+        except Exception as e:
+            logger.warning(f"Webページ読み込み失敗: {web_url} - {str(e)}")
+    
     # 通常読み込みのデータソースにWebページのデータを追加
     docs_all.extend(web_docs_all)
+    
+    logger.info(f"総ドキュメント数: {len(docs_all)}件 (ファイル: {len(docs_all) - len(web_docs_all)}, Web: {len(web_docs_all)})")
 
     return docs_all
 
