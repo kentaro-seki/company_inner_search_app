@@ -64,6 +64,18 @@ cn.display_app_title()
 # cn.display_select_mode()
 cn.display_select_mode(in_sidebar=True)
 
+# サイドバーにリセット機能を追加
+with st.sidebar:
+    st.markdown("---")
+    if st.button("🔄 アプリリセット", help="ベクターデータベースを再構築します"):
+        # セッション状態をクリア
+        keys_to_clear = ["retriever", "messages", "chat_history"]
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.success("アプリがリセットされました。ページを再読み込みしてください。")
+        st.rerun()
+
 
 # AIメッセージの初期表示
 cn.display_initial_ai_message()

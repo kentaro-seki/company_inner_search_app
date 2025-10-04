@@ -1,9 +1,7 @@
-[general]
-email = ""
-
 [server]
 headless = true
-enableCORS = false
+enableCORS = true
+enableXsrfProtection = false
 port = 8501
 
 [browser]
