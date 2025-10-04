@@ -56,10 +56,10 @@ SUPPORTED_EXTENSIONS = {
 WEB_URL_LOAD_TARGETS = [
     # 外部URLは使用しない（社内文書のみを検索対象とする）
 ]
-# 問題2マジックナンバー変更
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
-NUM_RETRIEVAL_DOCS = 10  # 問題1の部分、修正：検索性能向上のため5から10に増加
+# クラウド環境対応：メモリ効率化のためチャンクサイズを調整
+CHUNK_SIZE = 300  # クラウド環境でのメモリ使用量削減
+CHUNK_OVERLAP = 30
+NUM_RETRIEVAL_DOCS = 8  # メモリ効率化のため削減
 
 # ==========================================
 # プロンプトテンプレート

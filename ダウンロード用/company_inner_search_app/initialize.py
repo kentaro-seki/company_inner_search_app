@@ -112,60 +112,76 @@ def initialize_retriever():
     if "retriever" in st.session_state:
         return
     
-    # RAGの参照先となるデータソースの読み込み
-    docs_all = load_data_sources()
+    try:
+        # メモリ使用量を監視
+        import gc
+        gc.collect()  # ガベージコレクション実行
+        
+        # RAGの参照先となるデータソースの読み込み
+        docs_all = load_data_sources()
 
-    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
+        # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
+        for doc in docs_all:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
+        
+        # 埋め込みモデルの用意
+        embeddings = OpenAIEmbeddings()
+        
+        # チャンク分割用のオブジェクトを作成
+        text_splitter = CharacterTextSplitter(
+            chunk_size=ct.CHUNK_SIZE,
+            chunk_overlap=ct.CHUNK_OVERLAP,
+            separator="\n\n"  # txtファイルの論理的な分割のため、段落区切りを使用
+        )
+
+        # 部署別統合ドキュメントと通常ドキュメントを分離
+        department_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "department_employees"]
+        all_employees_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "all_employees"]
+        regular_docs = [doc for doc in docs_all if doc.metadata.get("document_type") not in ["department_employees", "all_employees"]]
+        
+        logger.info(f"部署別統合ドキュメント: {len(department_docs)}件")
+        logger.info(f"全社員統合ドキュメント: {len(all_employees_docs)}件")
+        logger.info(f"通常ドキュメント: {len(regular_docs)}件")
+
+        # 通常ドキュメントのみチャンク分割を実施
+        splitted_regular_docs = text_splitter.split_documents(regular_docs)
+        
+        # 部署別統合ドキュメントと全社員統合ドキュメントはそのまま追加（分割しない）
+        splitted_docs = splitted_regular_docs + department_docs + all_employees_docs
+        
+        logger.info(f"最終ドキュメント数: {len(splitted_docs)}件（分割後通常: {len(splitted_regular_docs)}, 統合: {len(department_docs + all_employees_docs)}）")
+
+        # デバッグ用：txtファイルのチャンクを確認
+        txt_chunks = [doc for doc in splitted_docs if doc.metadata.get("source", "").endswith(".txt")]
+        logger.info(f"txtファイルのチャンク数: {len(txt_chunks)}")
+        for i, chunk in enumerate(txt_chunks):
+            content_preview = chunk.page_content[:100].replace('\n', ' ')
+            logger.info(f"txtチャンク{i+1}: {chunk.metadata.get('source', '不明')} - 内容: {content_preview}...")
+
+        # ベクターストアの作成（エラーハンドリング付き）
+        db = Chroma.from_documents(splitted_docs, embedding=embeddings)
+
+        # ベクターストアを検索するRetrieverの作成（検索パラメータを最適化）
+        st.session_state.retriever = db.as_retriever(
+            search_type="similarity", 
+            search_kwargs={
+                "k": ct.NUM_RETRIEVAL_DOCS
+            }
+        )
+        
+        logger.info("Retriever初期化完了")
+        
+    except Exception as e:
+        logger.error(f"Retriever初期化エラー: {str(e)}")
+        st.error(f"システム初期化に失敗しました: {str(e)}")
+        raise e
     
-    # 埋め込みモデルの用意
-    embeddings = OpenAIEmbeddings()
-    
-    # チャンク分割用のオブジェクトを作成
-    text_splitter = CharacterTextSplitter(
-        chunk_size=ct.CHUNK_SIZE,
-        chunk_overlap=ct.CHUNK_OVERLAP,
-        separator="\n\n"  # txtファイルの論理的な分割のため、段落区切りを使用
-    )
-
-    # 部署別統合ドキュメントと通常ドキュメントを分離
-    department_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "department_employees"]
-    all_employees_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "all_employees"]
-    regular_docs = [doc for doc in docs_all if doc.metadata.get("document_type") not in ["department_employees", "all_employees"]]
-    
-    logger.info(f"部署別統合ドキュメント: {len(department_docs)}件")
-    logger.info(f"全社員統合ドキュメント: {len(all_employees_docs)}件")
-    logger.info(f"通常ドキュメント: {len(regular_docs)}件")
-
-    # 通常ドキュメントのみチャンク分割を実施
-    splitted_regular_docs = text_splitter.split_documents(regular_docs)
-    
-    # 部署別統合ドキュメントと全社員統合ドキュメントはそのまま追加（分割しない）
-    splitted_docs = splitted_regular_docs + department_docs + all_employees_docs
-    
-    logger.info(f"最終ドキュメント数: {len(splitted_docs)}件（分割後通常: {len(splitted_regular_docs)}, 統合: {len(department_docs + all_employees_docs)}）")
-
-    # デバッグ用：txtファイルのチャンクを確認
-    txt_chunks = [doc for doc in splitted_docs if doc.metadata.get("source", "").endswith(".txt")]
-    logger.info(f"txtファイルのチャンク数: {len(txt_chunks)}")
-    for i, chunk in enumerate(txt_chunks):
-        content_preview = chunk.page_content[:100].replace('\n', ' ')
-        logger.info(f"txtチャンク{i+1}: {chunk.metadata.get('source', '不明')} - 内容: {content_preview}...")
-
-    # ベクターストアの作成
-    db = Chroma.from_documents(splitted_docs, embedding=embeddings)
-
-    # ベクターストアを検索するRetrieverの作成（検索パラメータを最適化）
-    st.session_state.retriever = db.as_retriever(
-        search_type="similarity", 
-        search_kwargs={
-            "k": ct.NUM_RETRIEVAL_DOCS
-            # 問題1の部分、修正：検索性能向上のため5から10に増加
-        }
-    )
+    finally:
+        # メモリクリーンアップ
+        import gc
+        gc.collect()
 
 
 def initialize_session_state():

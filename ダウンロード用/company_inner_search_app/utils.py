@@ -25,13 +25,18 @@ import constants as ct
 load_dotenv()
 
 # OpenAI APIキーの設定（Streamlit Community Cloud対応）
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-elif "OPENAI_API_KEY" not in os.environ:
-    st.error("OpenAI APIキーが設定されていません。Streamlit Community CloudのSecretsで設定してください。")
+try:
+    if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+    elif "OPENAI_API_KEY" not in os.environ:
+        # ローカル環境では.envから読み込み
+        load_dotenv()
+        if "OPENAI_API_KEY" not in os.environ:
+            st.error("OpenAI APIキーが設定されていません。Streamlit Community CloudのSecretsまたは.envファイルで設定してください。")
+            st.stop()
+except Exception as e:
+    st.error(f"API キー設定エラー: {str(e)}")
     st.stop()
-# 「.env」ファイルで定義した環境変数の読み込み
-load_dotenv()
 
 
 ############################################################
