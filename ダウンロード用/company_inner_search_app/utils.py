@@ -108,7 +108,7 @@ def get_llm_response(chat_message):
         [
             ("system", question_answer_template),
             MessagesPlaceholder("chat_history"),
-            ("human", "{context}\n\n質問: {input}")
+            ("human", "{input}")
         ]
     )
 
