@@ -1,5 +1,16 @@
+[general]
+email = ""
+
+[server]
+headless = true
+enableCORS = false
+port = 8501
+
+[browser]
+gatherUsageStats = false
+
 [theme]
-primaryColor = "#0000FF"
+primaryColor = "#FF6B6B"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F0F0"
-textColor = "#000000"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
