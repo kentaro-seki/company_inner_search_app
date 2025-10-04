@@ -6,6 +6,7 @@
 # ライブラリの読み込み
 ############################################################
 import os
+import logging
 from dotenv import load_dotenv
 import streamlit as st
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -19,6 +20,16 @@ import constants as ct
 ############################################################
 # 設定関連
 ############################################################
+
+# 環境変数の読み込み
+load_dotenv()
+
+# OpenAI APIキーの設定（Streamlit Community Cloud対応）
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+elif "OPENAI_API_KEY" not in os.environ:
+    st.error("OpenAI APIキーが設定されていません。Streamlit Community CloudのSecretsで設定してください。")
+    st.stop()
 # 「.env」ファイルで定義した環境変数の読み込み
 load_dotenv()
 
@@ -69,6 +80,9 @@ def get_llm_response(chat_message):
     Returns:
         LLMからの回答
     """
+    # ロガーを読み込む
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
     # LLMのオブジェクトを用意
     llm = ChatOpenAI(model_name=ct.MODEL, temperature=ct.TEMPERATURE)
 
@@ -94,7 +108,7 @@ def get_llm_response(chat_message):
         [
             ("system", question_answer_template),
             MessagesPlaceholder("chat_history"),
-            ("human", "{input}")
+            ("human", "{context}\n\n質問: {input}")
         ]
     )
 
@@ -108,9 +122,31 @@ def get_llm_response(chat_message):
     # 「RAG x 会話履歴の記憶機能」を実現するためのChainを作成
     chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
+    # デバッグ用：検索前に実際の検索クエリを確認
+    logger.info(f"検索クエリ: {chat_message}")
+    
+    # デバッグ用：実際に検索されるドキュメントを確認
+    try:
+        # 直接retrieverで検索してみる
+        retrieved_docs = st.session_state.retriever.invoke(chat_message)
+        logger.info(f"検索結果数: {len(retrieved_docs)}")
+        for i, doc in enumerate(retrieved_docs):
+            source = doc.metadata.get("source", "不明")
+            content_preview = doc.page_content[:200].replace('\n', ' ')  # 200文字に拡張
+            logger.info(f"検索結果{i+1}: {source} - 内容: {content_preview}...")
+            # 人事部のデータがある場合は全内容をログ出力
+            if "人事部" in doc.page_content:
+                logger.info(f"人事部データ全内容: {doc.page_content}")
+    except Exception as e:
+        logger.error(f"検索デバッグ中にエラー: {str(e)}")
+
     # LLMへのリクエストとレスポンス取得
+    logger.info(f"LLMに送信するクエリ: {chat_message}")
     llm_response = chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
     # LLMレスポンスを会話履歴に追加
     st.session_state.chat_history.extend([HumanMessage(content=chat_message), llm_response["answer"]])
+
+    # レスポンス内容をログ出力
+    logger.info(f"LLMからの回答: {llm_response['answer'][:200]}...")
 
     return llm_response

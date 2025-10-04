@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 import streamlit as st
 from docx import Document
 from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.document_loaders import TextLoader
+import pandas as pd
+from langchain.docstore.document import Document
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -125,17 +128,44 @@ def initialize_retriever():
     text_splitter = CharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
         chunk_overlap=ct.CHUNK_OVERLAP,
-        separator="\n"
+        separator="\n\n"  # txtファイルの論理的な分割のため、段落区切りを使用
     )
 
-    # チャンク分割を実施
-    splitted_docs = text_splitter.split_documents(docs_all)
+    # 部署別統合ドキュメントと通常ドキュメントを分離
+    department_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "department_employees"]
+    all_employees_docs = [doc for doc in docs_all if doc.metadata.get("document_type") == "all_employees"]
+    regular_docs = [doc for doc in docs_all if doc.metadata.get("document_type") not in ["department_employees", "all_employees"]]
+    
+    logger.info(f"部署別統合ドキュメント: {len(department_docs)}件")
+    logger.info(f"全社員統合ドキュメント: {len(all_employees_docs)}件")
+    logger.info(f"通常ドキュメント: {len(regular_docs)}件")
+
+    # 通常ドキュメントのみチャンク分割を実施
+    splitted_regular_docs = text_splitter.split_documents(regular_docs)
+    
+    # 部署別統合ドキュメントと全社員統合ドキュメントはそのまま追加（分割しない）
+    splitted_docs = splitted_regular_docs + department_docs + all_employees_docs
+    
+    logger.info(f"最終ドキュメント数: {len(splitted_docs)}件（分割後通常: {len(splitted_regular_docs)}, 統合: {len(department_docs + all_employees_docs)}）")
+
+    # デバッグ用：txtファイルのチャンクを確認
+    txt_chunks = [doc for doc in splitted_docs if doc.metadata.get("source", "").endswith(".txt")]
+    logger.info(f"txtファイルのチャンク数: {len(txt_chunks)}")
+    for i, chunk in enumerate(txt_chunks):
+        content_preview = chunk.page_content[:100].replace('\n', ' ')
+        logger.info(f"txtチャンク{i+1}: {chunk.metadata.get('source', '不明')} - 内容: {content_preview}...")
 
     # ベクターストアの作成
     db = Chroma.from_documents(splitted_docs, embedding=embeddings)
 
-    # ベクターストアを検索するRetrieverの作成
-    st.session_state.retriever = db.as_retriever(search_kwargs={"k": ct.NUM_RETRIEVAL_DOCS})
+    # ベクターストアを検索するRetrieverの作成（検索パラメータを最適化）
+    st.session_state.retriever = db.as_retriever(
+        search_type="similarity", 
+        search_kwargs={
+            "k": ct.NUM_RETRIEVAL_DOCS
+            # 問題1の部分、修正：検索性能向上のため5から10に増加
+        }
+    )
 
 
 def initialize_session_state():
@@ -207,6 +237,9 @@ def file_load(path, docs_all):
         path: ファイルパス
         docs_all: データソースを格納する用のリスト
     """
+    # ロガーを読み込む
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
     # ファイルの拡張子を取得
     file_extension = os.path.splitext(path)[1]
     # ファイル名（拡張子を含む）を取得
@@ -214,10 +247,162 @@ def file_load(path, docs_all):
 
     # 想定していたファイル形式の場合のみ読み込む
     if file_extension in ct.SUPPORTED_EXTENSIONS:
-        # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
-        loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
-        docs = loader.load()
-        docs_all.extend(docs)
+        try:
+            # txtファイルの場合は文字エンコーディングの問題に対応
+            if file_extension == ".txt":
+                # まずUTF-8で試す
+                try:
+                    loader = TextLoader(path, encoding="utf-8")
+                    docs = loader.load()
+                except UnicodeDecodeError:
+                    # UTF-8で失敗した場合はShift_JISで試す
+                    try:
+                        loader = TextLoader(path, encoding="shift_jis")
+                        docs = loader.load()
+                        logger.info(f"Shift_JISエンコーディングで読み込み: {path}")
+                    except UnicodeDecodeError:
+                        # それでも失敗した場合はcp932で試す
+                        loader = TextLoader(path, encoding="cp932")
+                        docs = loader.load()
+                        logger.info(f"CP932エンコーディングで読み込み: {path}")
+            elif file_extension == ".csv":
+                # CSVファイルはカスタム処理
+                docs = load_csv_with_department_grouping(path)
+            else:
+                # その他のファイルは通常通り処理
+                loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
+                docs = loader.load()
+            
+            docs_all.extend(docs)
+            logger.info(f"ファイル読み込み成功: {path} (拡張子: {file_extension}, ドキュメント数: {len(docs)})")
+        except Exception as e:
+            logger.error(f"ファイル読み込み失敗: {path} - エラー: {str(e)}")
+    else:
+        logger.info(f"サポート外の拡張子のため読み込みスキップ: {path} (拡張子: {file_extension})")
+
+
+def load_csv_with_department_grouping(path):
+    """
+    CSVファイルを部署別にグループ化して統合ドキュメントを作成
+    """
+    try:
+        import pandas as pd
+        from langchain.schema import Document
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"部署別CSV処理開始: {path}")
+        
+        # pandasでCSVを読み込み
+        df = pd.read_csv(path, encoding="utf-8")
+        logger.info(f"CSV読み込み完了: {len(df)}行")
+        
+        # 部署列の値を確認
+        departments = df['部署'].unique()
+        logger.info(f"検出された部署: {list(departments)}")
+        
+        documents = []
+        
+        # 部署ごとにドキュメントを作成
+        for dept in departments:
+            if pd.isna(dept):
+                continue
+                
+            dept_employees = df[df['部署'] == dept]
+            logger.info(f"部署別統合処理: {dept} - {len(dept_employees)}名")
+            
+            # 部署の統合ドキュメントを作成
+            dept_content = f"【{dept}所属従業員一覧】\n\n"
+            dept_content += f"部署名: {dept}\n"
+            dept_content += f"所属従業員数: {len(dept_employees)}名\n\n"
+            
+            # 検索キーワードを冒頭に追加（検索精度向上のため）
+            dept_content += f"検索対象: {dept}に所属している従業員情報 {dept}の従業員一覧 {dept}部門の社員リスト\n"
+            dept_content += f"関連キーワード: {dept} {dept}所属 {dept}部門 {dept}スタッフ 従業員 社員 人員 メンバー 一覧 リスト 情報\n\n"
+            
+            # 人事部の場合は特別に強化
+            if dept == "人事部":
+                dept_content += f"人事部 人事部所属 人事部部門 人事課 人材管理部 HR部門 人事関連 人事担当 人事職員\n"
+                dept_content += f"従業員一覧 社員一覧 スタッフ一覧 人員リスト 組織図 人事メンバー 人事チーム\n"
+                dept_content += f"人事部に所属している従業員情報 人事部の従業員一覧 人事部門の社員 人事スタッフ情報\n\n"
+                logger.info(f"人事部特別処理適用: {len(dept_employees)}名")
+            
+            for idx, employee in dept_employees.iterrows():
+                employee_info = f"社員ID: {employee['社員ID']}\n"
+                employee_info += f"氏名: {employee['氏名（フルネーム）']}\n"
+                employee_info += f"性別: {employee['性別']}\n"
+                employee_info += f"年齢: {employee['年齢']}\n"
+                employee_info += f"部署: {employee['部署']}\n"
+                employee_info += f"役職: {employee['役職']}\n"
+                employee_info += f"従業員区分: {employee['従業員区分']}\n"
+                if '入社日' in employee and pd.notna(employee['入社日']):
+                    employee_info += f"入社日: {employee['入社日']}\n"
+                if 'メールアドレス' in employee and pd.notna(employee['メールアドレス']):
+                    employee_info += f"メールアドレス: {employee['メールアドレス']}\n"
+                if 'スキルセット' in employee and pd.notna(employee['スキルセット']):
+                    employee_info += f"スキルセット: {employee['スキルセット']}\n"
+                if '保有資格' in employee and pd.notna(employee['保有資格']):
+                    employee_info += f"保有資格: {employee['保有資格']}\n"
+                
+                dept_content += employee_info + "\n" + "-" * 50 + "\n\n"
+            
+            # 検索キーワードを追加して検索精度を向上
+            search_keywords = f"\n\n追加検索キーワード: {dept} {dept}所属 {dept}部門 {dept}の従業員 {dept}に所属している従業員"
+            search_keywords += f" 従業員 社員 スタッフ 人事 営業 IT 総務 マーケティング 経理 一覧 リスト 情報 メンバー 人員"
+            search_keywords += f" 組織 部署 チーム 職員 要員 人材"
+            dept_content += search_keywords
+            
+            # 部署の統合ドキュメントを作成
+            doc = Document(
+                page_content=dept_content,
+                metadata={
+                    "source": path,
+                    "department": dept,
+                    "document_type": "department_employees",
+                    "employee_count": len(dept_employees),
+                    "search_keywords": f"{dept} 従業員 社員 一覧 リスト 所属 部門",
+                    "title": f"{dept}所属従業員一覧",
+                    "description": f"{dept}に所属している全従業員の詳細情報一覧"
+                }
+            )
+            documents.append(doc)
+            
+            logger.info(f"部署別統合ドキュメント作成完了: {dept} ({len(dept_employees)}名)")
+    
+        # 全社員の統合ドキュメントも作成
+        all_employees_content = "【全社員一覧】\n\n"
+        for idx, employee in df.iterrows():
+            employee_info = f"社員ID: {employee['社員ID']} | "
+            employee_info += f"氏名: {employee['氏名（フルネーム）']} | "
+            employee_info += f"部署: {employee['部署']} | "
+            employee_info += f"役職: {employee['役職']} | "
+            employee_info += f"従業員区分: {employee['従業員区分']}\n"
+            all_employees_content += employee_info
+        
+        all_doc = Document(
+            page_content=all_employees_content,
+            metadata={
+                "source": path,
+                "document_type": "all_employees",
+                "employee_count": len(df)
+            }
+        )
+        documents.append(all_doc)
+        
+        logger.info(f"全社員統合ドキュメント作成完了: {len(df)}名")
+        logger.info(f"CSV処理完了: 合計{len(documents)}ドキュメント作成")
+        
+        # 統合ドキュメントのみを返す（個別行ドキュメントは作成しない）
+        return documents
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"CSV処理エラー: {path} - {str(e)}")
+        # エラーの場合は従来のCSVLoaderを使用
+        from langchain_community.document_loaders import CSVLoader
+        loader = CSVLoader(path, encoding="utf-8")
+        return loader.load()
 
 
 def adjust_string(s):
