@@ -1,0 +1,200 @@
+"""
+このファイルは、画面表示以外の様々な関数定義のファイルです。
+"""
+
+############################################################
+# ライブラリの読み込み
+############################################################
+import os
+import logging
+from dotenv import load_dotenv
+import streamlit as st
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.schema import HumanMessage
+from langchain_openai import ChatOpenAI
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+import constants as ct
+
+
+############################################################
+# 設定関連
+############################################################
+
+# 環境変数の読み込み
+load_dotenv()
+
+# OpenAI APIキーの設定（Streamlit Community Cloud対応）
+def ensure_openai_api_key():
+    """OpenAI APIキーが設定されていることを確認"""
+    try:
+        # Streamlit Cloudのsecretsから読み込み
+        if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+            os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+            return
+        
+        # 環境変数から確認
+        if "OPENAI_API_KEY" in os.environ and os.environ["OPENAI_API_KEY"]:
+            return
+        
+        # .envファイルから再読み込み
+        load_dotenv(override=True)
+        if "OPENAI_API_KEY" in os.environ and os.environ["OPENAI_API_KEY"]:
+            return
+            
+        # APIキーが見つからない場合
+        st.error("OpenAI APIキーが設定されていません。Streamlit Community CloudのSecretsまたは.envファイルで設定してください。")
+        st.stop()
+        
+    except Exception as e:
+        st.error(f"API キー設定エラー: {str(e)}")
+        st.stop()
+
+# APIキーの確認を実行
+ensure_openai_api_key()
+
+
+############################################################
+# 関数定義
+############################################################
+
+def get_source_icon(source):
+    """
+    メッセージと一緒に表示するアイコンの種類を取得
+
+    Args:
+        source: 参照元のありか
+
+    Returns:
+        メッセージと一緒に表示するアイコンの種類
+    """
+    # 参照元がWebページの場合とファイルの場合で、取得するアイコンの種類を変える
+    if source.startswith("http"):
+        icon = ct.LINK_SOURCE_ICON
+    else:
+        icon = ct.DOC_SOURCE_ICON
+    
+    return icon
+
+
+def build_error_message(message):
+    """
+    エラーメッセージと管理者問い合わせテンプレートの連結
+
+    Args:
+        message: 画面上に表示するエラーメッセージ
+
+    Returns:
+        エラーメッセージと管理者問い合わせテンプレートの連結テキスト
+    """
+    return "\n".join([message, ct.COMMON_ERROR_MESSAGE])
+
+
+def get_llm_response(chat_message):
+    """
+    LLMからの回答取得
+
+    Args:
+        chat_message: ユーザー入力値
+
+    Returns:
+        LLMからの回答
+    """
+    # ロガーを読み込む
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    # LLMのオブジェクトを用意
+    # LLMの初期化
+    llm = ChatOpenAI(
+        model_name="gpt-4o-mini",
+        temperature=0.0  # 一貫性向上のため温度を0に
+    )
+
+    # 会話履歴なしでもLLMに理解してもらえる、独立した入力テキストを取得するためのプロンプトテンプレートを作成
+    question_generator_template = ct.SYSTEM_PROMPT_CREATE_INDEPENDENT_TEXT
+    question_generator_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", question_generator_template),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}")
+        ]
+    )
+
+    # モードによってLLMから回答を取得する用のプロンプトを変更
+    if st.session_state.mode == ct.ANSWER_MODE_1:
+        # モードが「社内文書検索」の場合のプロンプト
+        question_answer_template = ct.SYSTEM_PROMPT_DOC_SEARCH
+    else:
+        # モードが「社内問い合わせ」の場合のプロンプト
+        question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
+    # LLMから回答を取得する用のプロンプトテンプレートを作成
+    question_answer_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", question_answer_template),
+            ("system", "参考文書:\n{context}"),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}")
+        ]
+    )
+
+    # 会話履歴なしでもLLMに理解してもらえる、独立した入力テキストを取得するためのRetrieverを作成
+    history_aware_retriever = create_history_aware_retriever(
+        llm, st.session_state.retriever, question_generator_prompt
+    )
+
+    # LLMから回答を取得する用のChainを作成
+    question_answer_chain = create_stuff_documents_chain(llm, question_answer_prompt)
+    # 「RAG x 会話履歴の記憶機能」を実現するためのChainを作成
+    chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+    # デバッグ用：検索前に実際の検索クエリを確認
+    logger.info(f"検索クエリ: {chat_message}")
+    
+    # 従業員情報の質問の場合、質問を強化
+    enhanced_message = chat_message
+    if any(keyword in chat_message.lower() for keyword in ["人事部", "従業員", "社員", "メンバー", "所属"]):
+        enhanced_message = f"""
+{chat_message}
+
+【重要指示】
+- 文脈に記載されている従業員情報は全て実在の社員データです
+- 「所属従業員数: X名」と記載されている場合、必ずX名全員をマークダウン表で表示してください
+- 一部省略や架空の人物追加は絶対に禁止です
+- 文脈にない情報や架空の人物を作成してはいけません
+- 文脈に含まれる全ての実際の従業員情報のみを使用してください
+- 「中村美咲」など文脈にない架空の人物は絶対に回答に含めないでください
+"""
+        logger.info(f"従業員情報質問として強化されたメッセージ: {enhanced_message}")
+    
+    # デバッグ用：実際に検索されるドキュメントを確認
+    try:
+        # 直接retrieverで検索してみる
+        retrieved_docs = st.session_state.retriever.invoke(enhanced_message)
+        logger.info(f"検索結果数: {len(retrieved_docs)}")
+        for i, doc in enumerate(retrieved_docs):
+            source = doc.metadata.get("source", "不明")
+            content_preview = doc.page_content[:200].replace('\n', ' ')  # 200文字に拡張
+            logger.info(f"検索結果{i+1}: {source} - 内容: {content_preview}...")
+            # 人事部のデータがある場合は全内容をログ出力
+            if "人事部" in doc.page_content:
+                logger.info(f"人事部データ全内容: {doc.page_content}")
+            # 各検索結果の先頭1000文字もログ出力
+            if i < 3:  # 最初の3つだけ詳細ログ
+                logger.info(f"検索結果{i+1}詳細(1000文字): {doc.page_content[:1000]}")
+    except Exception as e:
+        logger.error(f"検索デバッグ中にエラー: {str(e)}")
+
+    # LLMへのリクエストとレスポンス取得
+    logger.info(f"LLMに送信するクエリ: {enhanced_message}")
+    llm_response = chain.invoke({"input": enhanced_message, "chat_history": st.session_state.chat_history})
+    
+    # LLMに送信された実際のcontextを確認するためのデバッグ
+    logger.info(f"LLMに送信されたcontext（一部）: {str(llm_response.get('context', [])[:1000])}")
+    
+    # LLMレスポンスを会話履歴に追加
+    st.session_state.chat_history.extend([HumanMessage(content=chat_message), llm_response["answer"]])
+
+    # レスポンス内容をログ出力
+    logger.info(f"LLMからの回答: {llm_response['answer'][:200]}...")
+
+    return llm_response

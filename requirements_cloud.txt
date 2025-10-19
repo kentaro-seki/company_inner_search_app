@@ -1,0 +1,17 @@
+# Streamlit Community Cloud用の最適化された依存関係
+# メモリ使用量を抑制し、互換性を向上させるためのバージョン指定
+
+streamlit>=1.28.0
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.20
+openai>=1.0.0
+chromadb>=0.4.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+pymupdf>=1.23.0
+docx2txt>=0.8
+python-docx>=1.1.0
+
+# 軽量化のため、必要最小限のパッケージのみ指定
+# 他の依存関係は自動的に解決される

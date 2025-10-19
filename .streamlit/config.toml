@@ -1,0 +1,29 @@
+# Streamlit Community Cloud用の設定ファイル
+# デプロイ時の初期化エラーを防ぐための最適化設定
+
+[server]
+# メモリ効率化のため
+maxUploadSize = 50
+enableCORS = true
+enableXsrfProtection = false
+port = 8501
+headless = true
+
+# クラウド環境での安定性向上
+[browser]
+gatherUsageStats = false
+
+# UI設定
+[theme]
+primaryColor = "#FF6B6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+
+# デバッグ設定（本番では無効化）
+[logger]
+level = "info"
+
+# キャッシュ設定
+[global]
+developmentMode = false
